@@ -1,0 +1,43 @@
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    ports: ["5432:5432"]
+    volumes: ["pgdata:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  migrate:
+    image: migrate/migrate
+    volumes: ["./migrations:/migrations"]
+    command: ["-path", "/migrations", "-database", "${DATABASE_URL}", "up"]
+    depends_on:
+      postgres: { condition: service_healthy }
+
+  server:
+    build: { context: ., args: { APP: server } }
+    env_file: .env
+    ports: ["8080:8080"]
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+
+  dispatcher:
+    build: { context: ., args: { APP: dispatcher } }
+    env_file: .env
+    deploy: { replicas: 2 }
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+
+  fakereceiver:
+    build: { context: ., args: { APP: fakereceiver } }
+    env_file: .env
+    ports: ["9000:9000"]
+
+volumes:
+  pgdata: {}
