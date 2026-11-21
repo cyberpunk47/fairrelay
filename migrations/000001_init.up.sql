@@ -27,7 +27,7 @@ CREATE TABLE endpoints(
 create table events(
     id BIGINT PRIMARY KEY GENERATED ALWAYS AS IDENTITY,
     tenant_id BIGINT NOT NULL REFERENCES tenants(id) ON DELETE RESTRICT,
-    endpoint_id BIGINT NOT NULL REFERENCES endpoints(id) ON DELETE RESTRICT,
+    endpoint_id BIGINT NOT NULL,
     external_id TEXT not null,
     event_type TEXT NOT NULL,
     payload TEXT NOT NULL,
@@ -56,3 +56,17 @@ create table delivery_attempts(
     duration_ms INT not null check (duration_ms >= 0),
     unique(event_ref, lease_token)
 );
+
+
+-- Indexes
+
+CREATE INDEX per_tenants_due_events_index on events(tenant_id, next_attempt_at) where status = 'PENDING';
+
+-- this 2nd Index can be dropped if we are not using the per_tenants_due_events_index, but it is useful for debugging and monitoring purposes.
+create index pending_events_index on events(next_attempt_at) where status = 'PENDING';
+
+create index cap_check_index on events(tenant_id, lease_until) where status = 'IN_FLIGHT';
+
+create index all_in_flight_events_index on events(lease_until) where status = 'IN_FLIGHT';
+
+create index all_endpoints_per_tenant_index on endpoints(tenant_id);
