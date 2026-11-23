@@ -23,6 +23,12 @@ func main() {
 		log.Fatalf("database error: %v", err)
 	}
 	defer pg.Close()
+	// 4. Reclaim expired events
+	count, err := pg.ReclaimExpired(ctx)
+	if err != nil {
+		log.Fatalf("reclaim expired error: %v", err)
+	}
+	fmt.Printf("reclaimed %d expired events\n", count)
 
 	// 3. Try to claim 3 times for tenant 1
 	for i := 1; i <= 3; i++ {
@@ -37,4 +43,5 @@ func main() {
 		fmt.Printf("claim %d: id=%d external_id=%s attempts=%d lease_token=%d\n",
 			i, ev.ID, ev.ExternalID, ev.Attempts, ev.LeaseToken)
 	}
+	
 }

@@ -147,3 +147,16 @@ func (p *Postgres) ClaimNext(ctx context.Context, tenantID int64, lease time.Dur
 	}
 	return ev, true, nil
 }
+
+const reclaimExpiredSQL = `
+UPDATE events 
+SET status = 'PENDING', lease_until = NULL
+WHERE status = 'IN_FLIGHT' AND lease_until <= now()`
+
+func (p* Postgres) ReclaimExpired(ctx context.Context) (int64, error) {
+	res , err := p.pool.Exec(ctx, reclaimExpiredSQL)
+	if err != nil {
+		return 0, fmt.Errorf("reclaim expired: %w", err)
+	}
+	return res.RowsAffected(), nil
+}
