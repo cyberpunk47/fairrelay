@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/cyberpunk47/fairrelay/internal/domain"
 	"github.com/jackc/pgx/v5"
@@ -67,4 +68,82 @@ func (p *Postgres) InsertEvent(ctx context.Context, e domain.NewEvent) (int64, b
 		return 0, false, fmt.Errorf("insert event: %w", err)
 	}
 	return id, true, nil
+}
+
+const lockTenantSQL = `
+SELECT max_inflight FROM tenants WHERE id = $1 FOR UPDATE`
+
+const countInFlightSQL = `
+SELECT count(*) FROM events
+WHERE tenant_id = $1 AND status = 'IN_FLIGHT' AND lease_until > now()`
+
+// The inner SELECT picks one row; the outer UPDATE claims it.
+const claimSQL = `
+UPDATE events
+SET status       = 'IN_FLIGHT',
+    lease_until  = now() + make_interval(secs => $2),
+    lease_token  = lease_token + 1,
+    attempts     = attempts + 1
+WHERE id = (
+    SELECT id FROM events
+    WHERE tenant_id = $1
+      AND status = 'PENDING'
+      AND next_attempt_at <= now()
+    ORDER BY next_attempt_at
+    LIMIT 1
+    FOR UPDATE SKIP LOCKED
+)
+RETURNING id, tenant_id, endpoint_id, external_id, event_type, payload, attempts, lease_token`
+
+func (p *Postgres) ClaimNext(ctx context.Context, tenantID int64, lease time.Duration) (domain.ClaimedEvent, bool, error) {
+	// 0. Prepare return value
+	var ev domain.ClaimedEvent
+
+	// 1. BEGIN
+	tx, err := p.pool.Begin(ctx)
+	if err != nil {
+		return ev, false, fmt.Errorf("begin: %w", err)
+	}
+	// If we return early, this undoes everything and releases the locks.
+	// After a successful Commit it does nothing.
+	defer tx.Rollback(ctx)
+
+	// 2. Lock the tenant row and read its cap
+	var maxInflight int
+	err = tx.QueryRow(ctx, lockTenantSQL, tenantID).Scan(&maxInflight)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ev, false, nil // tenant doesn't exist: nothing to do
+	}
+	if err != nil {
+		return ev, false, fmt.Errorf("lock tenant: %w", err)
+	}
+
+	// 3. Count events in flight
+	var inFlight int
+	if err := tx.QueryRow(ctx, countInFlightSQL, tenantID).Scan(&inFlight); err != nil {
+		return ev, false, fmt.Errorf("count in-flight: %w", err)
+	}
+
+	// 4. Cap full?
+	if inFlight >= maxInflight {
+		return ev, false, nil
+	}
+
+	// 5. Claim the oldest due event
+	err = tx.QueryRow(ctx, claimSQL, tenantID, lease.Seconds()).Scan(
+		&ev.ID, &ev.TenantID, &ev.EndpointID, &ev.ExternalID,
+		&ev.EventType, &ev.Payload, &ev.Attempts, &ev.LeaseToken,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ev, false, nil // 6. nothing due
+	}
+	if err != nil {
+		return ev, false, fmt.Errorf("claim: %w", err)
+	}
+
+	// 7. COMMIT
+	if err := tx.Commit(ctx); err != nil {
+		return ev, false, fmt.Errorf("commit: %w", err)
+	}
+	return ev, true, nil
 }
