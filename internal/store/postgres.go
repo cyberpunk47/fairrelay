@@ -39,6 +39,8 @@ func (p *Postgres) Close() {
 	p.pool.Close()
 }
 
+// ---------------- InsertEvent ----------------
+
 const insertEventSQL = `
 INSERT INTO events (tenant_id, endpoint_id, external_id, event_type, payload)
 VALUES ($1, $2, $3, $4, $5)
@@ -56,8 +58,7 @@ func (p *Postgres) InsertEvent(ctx context.Context, e domain.NewEvent) (int64, b
 		return 0, false, nil
 	}
 
-	// 2. The tenant or endpoint doesn't exist, or they don't belong together.
-	//    Postgres reports code 23503; turn it into our own named error.
+	// 2. Tenant or endpoint doesn't exist, or they don't belong together.
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && pgErr.Code == pgForeignKeyViolation {
 		return 0, false, ErrUnknownEndpoint
@@ -70,6 +71,8 @@ func (p *Postgres) InsertEvent(ctx context.Context, e domain.NewEvent) (int64, b
 	return id, true, nil
 }
 
+// ---------------- ClaimNext ----------------
+
 const lockTenantSQL = `
 SELECT max_inflight FROM tenants WHERE id = $1 FOR UPDATE`
 
@@ -80,10 +83,10 @@ WHERE tenant_id = $1 AND status = 'IN_FLIGHT' AND lease_until > now()`
 // The inner SELECT picks one row; the outer UPDATE claims it.
 const claimSQL = `
 UPDATE events
-SET status       = 'IN_FLIGHT',
-    lease_until  = now() + make_interval(secs => $2),
-    lease_token  = lease_token + 1,
-    attempts     = attempts + 1
+SET status      = 'IN_FLIGHT',
+    lease_until = now() + make_interval(secs => $2),
+    lease_token = lease_token + 1,
+    attempts    = attempts + 1
 WHERE id = (
     SELECT id FROM events
     WHERE tenant_id = $1
@@ -96,7 +99,6 @@ WHERE id = (
 RETURNING id, tenant_id, endpoint_id, external_id, event_type, payload, attempts, lease_token`
 
 func (p *Postgres) ClaimNext(ctx context.Context, tenantID int64, lease time.Duration) (domain.ClaimedEvent, bool, error) {
-	// 0. Prepare return value
 	var ev domain.ClaimedEvent
 
 	// 1. BEGIN
@@ -104,15 +106,13 @@ func (p *Postgres) ClaimNext(ctx context.Context, tenantID int64, lease time.Dur
 	if err != nil {
 		return ev, false, fmt.Errorf("begin: %w", err)
 	}
-	// If we return early, this undoes everything and releases the locks.
-	// After a successful Commit it does nothing.
-	defer tx.Rollback(ctx)
+	defer tx.Rollback(ctx) // undoes everything on an early return; does nothing after Commit
 
 	// 2. Lock the tenant row and read its cap
 	var maxInflight int
 	err = tx.QueryRow(ctx, lockTenantSQL, tenantID).Scan(&maxInflight)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return ev, false, nil // tenant doesn't exist: nothing to do
+		return ev, false, nil // tenant doesn't exist
 	}
 	if err != nil {
 		return ev, false, fmt.Errorf("lock tenant: %w", err)
@@ -148,15 +148,147 @@ func (p *Postgres) ClaimNext(ctx context.Context, tenantID int64, lease time.Dur
 	return ev, true, nil
 }
 
-const reclaimExpiredSQL = `
-UPDATE events 
-SET status = 'PENDING', lease_until = NULL
-WHERE status = 'IN_FLIGHT' AND lease_until <= now()`
+// ---------------- ReclaimExpired ----------------
 
-func (p* Postgres) ReclaimExpired(ctx context.Context) (int64, error) {
-	res , err := p.pool.Exec(ctx, reclaimExpiredSQL)
+const reclaimExpiredSQL = `
+UPDATE events
+SET status      = CASE WHEN attempts >= $1 THEN 'DEAD' ELSE 'PENDING' END,
+    lease_until = NULL,
+    last_error  = 'lease expired'
+WHERE status = 'IN_FLIGHT' AND lease_until < now()`
+
+func (p *Postgres) ReclaimExpired(ctx context.Context, maxAttempts int) (int64, error) {
+	tag, err := p.pool.Exec(ctx, reclaimExpiredSQL, maxAttempts)
 	if err != nil {
 		return 0, fmt.Errorf("reclaim expired: %w", err)
 	}
-	return res.RowsAffected(), nil
+	return tag.RowsAffected(), nil
+}
+
+// ---------------- Results: delivered / retry / dead ----------------
+
+const insertAttemptSQL = `
+INSERT INTO delivery_attempts
+    (event_ref, attempt_number, lease_token, started_at, finished_at, http_status, error, duration_ms)
+VALUES ($1, $2, $3, $4, $5, NULLIF($6, 0), NULLIF($7, ''), $8)
+ON CONFLICT (event_ref, lease_token) DO NOTHING`
+
+// All three end with the same WHERE: the token check (fencing).
+const markDeliveredSQL = `
+UPDATE events
+SET status       = 'DELIVERED',
+    delivered_at = now(),
+    lease_until  = NULL,
+    last_error   = NULL
+WHERE id = $1 AND lease_token = $2 AND status = 'IN_FLIGHT'`
+
+const markRetrySQL = `
+UPDATE events
+SET status          = 'PENDING',
+    next_attempt_at = $3,
+    last_error      = $4,
+    lease_until     = NULL
+WHERE id = $1 AND lease_token = $2 AND status = 'IN_FLIGHT'`
+
+const markDeadSQL = `
+UPDATE events
+SET status      = 'DEAD',
+    last_error  = $3,
+    lease_until = NULL
+WHERE id = $1 AND lease_token = $2 AND status = 'IN_FLIGHT'`
+
+// insertAttempt writes the history row inside an existing transaction.
+func insertAttempt(ctx context.Context, tx pgx.Tx, r domain.AttemptResult) error {
+	_, err := tx.Exec(ctx, insertAttemptSQL,
+		r.EventID, r.AttemptNumber, r.LeaseToken, r.StartedAt, r.FinishedAt,
+		r.HTTPStatus, r.Error, r.DurationMs,
+	)
+	if err != nil {
+		return fmt.Errorf("insert attempt: %w", err)
+	}
+	return nil
+}
+
+func (p *Postgres) MarkDelivered(ctx context.Context, r domain.AttemptResult) error {
+	// 1. BEGIN
+	tx, err := p.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin: %w", err)
+	}
+	// 2. Undo on early return
+	defer tx.Rollback(ctx)
+
+	// 3. Record the attempt (it really happened, even if our lease was lost)
+	if err := insertAttempt(ctx, tx, r); err != nil {
+		return err
+	}
+
+	// 4. Update the event only if our token is still current
+	tag, err := tx.Exec(ctx, markDeliveredSQL, r.EventID, r.LeaseToken)
+	if err != nil {
+		return fmt.Errorf("mark delivered: %w", err)
+	}
+
+	// 5. COMMIT
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit: %w", err)
+	}
+
+	// 6. 0 rows changed = someone else holds the event now
+	if tag.RowsAffected() == 0 {
+		return ErrLeaseLost
+	}
+	return nil
+}
+
+func (p *Postgres) MarkRetry(ctx context.Context, r domain.AttemptResult, nextAttemptAt time.Time) error {
+	tx, err := p.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	if err := insertAttempt(ctx, tx, r); err != nil {
+		return err
+	}
+
+	tag, err := tx.Exec(ctx, markRetrySQL, r.EventID, r.LeaseToken, nextAttemptAt, r.Error)
+	if err != nil {
+		return fmt.Errorf("mark retry: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit: %w", err)
+	}
+
+	if tag.RowsAffected() == 0 {
+		return ErrLeaseLost
+	}
+	return nil
+}
+
+func (p *Postgres) MarkDead(ctx context.Context, r domain.AttemptResult) error {
+	tx, err := p.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	if err := insertAttempt(ctx, tx, r); err != nil {
+		return err
+	}
+
+	tag, err := tx.Exec(ctx, markDeadSQL, r.EventID, r.LeaseToken, r.Error)
+	if err != nil {
+		return fmt.Errorf("mark dead: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit: %w", err)
+	}
+
+	if tag.RowsAffected() == 0 {
+		return ErrLeaseLost
+	}
+	return nil
 }

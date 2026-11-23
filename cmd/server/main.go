@@ -39,5 +39,4 @@ func main() {
 		log.Fatalf("server stopped: %v", err)
 	}
 
-	
 }
