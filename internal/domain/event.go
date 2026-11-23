@@ -30,6 +30,12 @@ type AttemptResult struct {
 	Error         string // Emppt "" means no error
 }
 
+type Endpoint struct {
+	ID       int64
+	TenantID int64
+	URL      string
+	Secret   string
+}
 const (
 	StatusPending   = "PENDING"
 	StatusInFlight  = "IN_FLIGHT"

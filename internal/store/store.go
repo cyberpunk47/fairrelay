@@ -26,6 +26,7 @@ type Store interface {
 	MarkDelivered(ctx context.Context, r domain.AttemptResult) error
 	MarkRetry(ctx context.Context, r domain.AttemptResult, nextAttemptAt time.Time) error
 	MarkDead(ctx context.Context, r domain.AttemptResult) error
+	GetEndpoint(ctx context.Context, id int64) (domain.Endpoint, error)
 }
 
 // ErrUnknownEndpoint: the endpoint doesn't exist or belongs to another tenant.

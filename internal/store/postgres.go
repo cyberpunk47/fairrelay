@@ -292,3 +292,17 @@ func (p *Postgres) MarkDead(ctx context.Context, r domain.AttemptResult) error {
 	}
 	return nil
 }
+
+const getEndpointSQL = `
+SELECT id , tenant_id, url, secret from 
+endpoints WHERE id = $1`
+
+func (p *Postgres) GetEndpoint(ctx context.Context, id int64) (domain.Endpoint, error) {
+	var ep domain.Endpoint
+	err := p.pool.QueryRow(ctx, getEndpointSQL , id).Scan(&ep.ID , &ep.TenantID , &ep.URL, &ep.Secret)
+	if err != nil {
+		return ep, fmt.Errorf("get endpoint %d: %w", id, err)
+	}
+	return ep, nil
+}
+
