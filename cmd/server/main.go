@@ -2,42 +2,40 @@ package main
 
 import (
 	"context"
-	"fmt"
-	"os"
+	"log"
+	"net/http"
+	"time"
 
 	"github.com/cyberpunk47/fairrelay/internal/config"
-	"github.com/cyberpunk47/fairrelay/internal/domain"
+	"github.com/cyberpunk47/fairrelay/internal/ingest"
 	"github.com/cyberpunk47/fairrelay/internal/store"
 )
 
 func main() {
 	cfg, err := config.Load()
 	if err != nil {
-		fmt.Println("config error:")
-		fmt.Println(err)
-		os.Exit(1)
+		log.Fatalf("config error: %v", err)
 	}
 
 	ctx := context.Background()
 	pg, err := store.NewPostgres(ctx, cfg.DatabaseURL)
 	if err != nil {
-		fmt.Println("database error:")
-		fmt.Println(err)
-		os.Exit(1)
+		log.Fatalf("database error: %v", err)
 	}
 	defer pg.Close()
 
-	id, created, err := pg.InsertEvent(ctx, domain.NewEvent{
-		TenantID:   1,
-		EndpointID: 1,
-		ExternalID: "evt_test_1",
-		EventType:  "test_event",
-		Payload:    `{"hello":"world"}`,
-	})
-	if err != nil {
-		fmt.Println("insert error:")
-		fmt.Println(err)
-		os.Exit(1)
+	h := ingest.NewHandler(pg, cfg.ProducerAPIKey)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /events", h.CreateEvent)
+
+	srv := &http.Server{
+		Addr:              cfg.HTTPAddr,
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
 	}
-	fmt.Println("id:", id, "| created:", created)
+	log.Printf("ingest API listening on %s", cfg.HTTPAddr)
+	if err := srv.ListenAndServe(); err != nil {
+		log.Fatalf("server stopped: %v", err)
+	}
 }
