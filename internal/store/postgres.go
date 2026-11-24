@@ -306,3 +306,17 @@ func (p *Postgres) GetEndpoint(ctx context.Context, id int64) (domain.Endpoint, 
 	return ep, nil
 }
 
+const dueTenantsSQL = `SELECT DISTINCT tenant_id FROM events
+WHERE status = 'PENDING' AND next_attempt_at <= now()
+ORDER BY tenant_id`
+func (p* Postgres) DueTenants(ctx context.Context)([]int64, error){
+	rows , err := p.pool.Query(ctx , dueTenantsSQL)
+	if err != nil{
+		return nil , fmt.Errorf("due tenants: %w", err)
+	}
+	ids , err := pgx.CollectRows(rows, pgx.RowTo[int64])
+	if err != nil{
+		return nil , fmt.Errorf("due tenants: %w", err)
+	}
+	return ids, nil
+}

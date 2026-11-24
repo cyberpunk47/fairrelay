@@ -4,6 +4,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"io"
 	"sync"
 	"time"
 )
@@ -33,6 +34,7 @@ func (rc *receiver) setMode(tenant string, mode string) {
 
 // handleWebhook: POST /t/{tenant}, where webhooks are delivered.
 func (rc *receiver) handleWebhook(w http.ResponseWriter, r *http.Request) {
+	_ , _ = io.Copy(io.Discard, r.Body) // read and discard the body, so the sender can reuse the connection
 	tenant := r.PathValue("tenant")
 	eventID := r.Header.Get("X-Webhook-ID")
 	mode := rc.getMode(tenant)
