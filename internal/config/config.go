@@ -12,15 +12,14 @@ type Config struct {
 	DatabaseURL    string // DATABASE_URL (required, no default)
 	HTTPAddr       string // HTTP_ADDR
 	ProducerAPIKey string // PRODUCER_API_KEY (required)
-	SigningSecret  string // SIGNING_SECRET (required)
 	Policy         string // POLICY: fifo | roundrobin | drr
-	ReceiverAddr   string // RECEIVER_ADDR
 
-	WorkersFast       int // WORKERS_FAST
-	WorkersSlow       int // WORKERS_SLOW
-	TenantMaxInflight int // TENANT_MAX_INFLIGHT
-	MaxAttempts       int // MAX_ATTEMPTS
-	BreakerFailures   int // BREAKER_FAILURES
+	// Per-tenant limits (max_inflight, weight) live in the tenants table, not here,
+	// so each tenant can have its own. Each endpoint signs with its own secret.
+
+	Workers         int // WORKERS: delivery goroutines per dispatcher process
+	MaxAttempts     int // MAX_ATTEMPTS
+	BreakerFailures int // BREAKER_FAILURES: failures in a row that open an endpoint's breaker
 
 	LeaseTTL        time.Duration // LEASE_TTL
 	ConnectTimeout  time.Duration // CONNECT_TIMEOUT
@@ -81,23 +80,10 @@ func Load() (Config, error) {
 	if cfg.ProducerAPIKey == "" {
 		errs = append(errs, errors.New("PRODUCER_API_KEY: required"))
 	}
-	cfg.SigningSecret = getString("SIGNING_SECRET", "")
-	if cfg.SigningSecret == "" {
-		errs = append(errs, errors.New("SIGNING_SECRET: required"))
-	}
 	cfg.Policy = getString("POLICY", "drr")
-	cfg.ReceiverAddr = getString("RECEIVER_ADDR", ":9000")
 
 	// number settings
-	cfg.WorkersFast, err = getInt("WORKERS_FAST", 150)
-	if err != nil {
-		errs = append(errs, err)
-	}
-	cfg.WorkersSlow, err = getInt("WORKERS_SLOW", 50)
-	if err != nil {
-		errs = append(errs, err)
-	}
-	cfg.TenantMaxInflight, err = getInt("TENANT_MAX_INFLIGHT", 2)
+	cfg.Workers, err = getInt("WORKERS", 200)
 	if err != nil {
 		errs = append(errs, err)
 	}
@@ -156,14 +142,8 @@ func validate(cfg Config) error {
 	}
 
 	// valid when: every count is greater than 0
-	if cfg.WorkersFast <= 0 {
-		errs = append(errs, fmt.Errorf("WORKERS_FAST: must be greater than 0, got %d", cfg.WorkersFast))
-	}
-	if cfg.WorkersSlow <= 0 {
-		errs = append(errs, fmt.Errorf("WORKERS_SLOW: must be greater than 0, got %d", cfg.WorkersSlow))
-	}
-	if cfg.TenantMaxInflight <= 0 {
-		errs = append(errs, fmt.Errorf("TENANT_MAX_INFLIGHT: must be greater than 0, got %d", cfg.TenantMaxInflight))
+	if cfg.Workers <= 0 {
+		errs = append(errs, fmt.Errorf("WORKERS: must be greater than 0, got %d", cfg.Workers))
 	}
 	if cfg.MaxAttempts <= 0 {
 		errs = append(errs, fmt.Errorf("MAX_ATTEMPTS: must be greater than 0, got %d", cfg.MaxAttempts))

@@ -96,7 +96,7 @@ func (rc *receiver) handleSetMode(w http.ResponseWriter, r *http.Request) {
 func main() {
 	addr := os.Getenv("RECEIVER_ADDR")
 	if addr == "" {
-		addr = ":9000"
+		addr = ":9900"
 	}
 
 	rc := &receiver{

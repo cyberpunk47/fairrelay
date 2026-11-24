@@ -11,11 +11,14 @@ import (
 type Scheduler struct {
 	policy Policy
 	jobs   chan<- domain.ClaimedEvent
+	wake   <-chan struct{} // a worker finished a delivery: a cap slot may be free again
 	idle   time.Duration
 }
 
-func New(p Policy, jobs chan<- domain.ClaimedEvent) *Scheduler {
-	return &Scheduler{policy: p, jobs: jobs, idle: 200 * time.Millisecond}
+// New builds a scheduler. Workers signal on wake after each delivery, so the
+// scheduler doesn't sit out its idle wait while a freed slot could be used.
+func New(p Policy, jobs chan<- domain.ClaimedEvent, wake <-chan struct{}) *Scheduler {
+	return &Scheduler{policy: p, jobs: jobs, wake: wake, idle: 200 * time.Millisecond}
 }
 
 func (s *Scheduler) Run(ctx context.Context) {
@@ -37,10 +40,13 @@ func (s *Scheduler) Run(ctx context.Context) {
 			}
 		}
 
+		// Nothing claimable right now (no due events, or every tenant at its cap).
+		// Wait for a delivery to finish, or the idle timeout for new events / retries.
 		if len(events) == 0 {
 			select {
 			case <-ctx.Done():
 				return
+			case <-s.wake:
 			case <-time.After(s.idle):
 			}
 		}

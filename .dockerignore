@@ -1,0 +1,10 @@
+# Never send secrets or local junk into the Docker build
+.env
+.git
+bin/
+bench/results/
+bench/k6/
+docs/
+tests/
+body.json
+*.md

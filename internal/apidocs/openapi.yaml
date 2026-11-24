@@ -1,0 +1,180 @@
+openapi: 3.0.3
+info:
+  title: FairRelay Ingest API
+  version: "1.0"
+  description: |
+    Producers send webhook events here and can look them up afterwards. FairRelay stores each event once
+    (idempotent on tenant_id + event_id) and delivers it to the tenant's endpoint
+    in the background, fairly across tenants.
+
+    Click **Authorize** and paste your `PRODUCER_API_KEY` before trying a request.
+servers:
+  - url: /
+security:
+  - ApiKeyAuth: []
+paths:
+  /events:
+    post:
+      summary: Accept an event for delivery
+      description: |
+        Returns **202** when the event is new and queued.
+        Sending the same `event_id` again for the same tenant returns **200** with `duplicate: true`
+        and does not create a second delivery.
+      operationId: createEvent
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/EventRequest" }
+            example:
+              tenant_id: 2
+              endpoint_id: 2
+              event_id: evt_swagger_1
+              event_type: payment.completed
+              payload: { amount: 500, currency: INR }
+      responses:
+        "202":
+          description: Accepted (new event, queued for delivery)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Accepted" }
+        "200":
+          description: Duplicate (this event_id was already accepted for this tenant)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Duplicate" }
+        "400":
+          description: Invalid JSON, unknown field, or a missing/invalid field
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+              example: { error: event_id is required }
+        "401":
+          description: Missing or wrong X-API-Key
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+              example: { error: invalid api key }
+        "413":
+          description: Body larger than 1 MB
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "422":
+          description: The endpoint does not exist or belongs to another tenant
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+              example: { error: unknown endpoint for this tenant }
+        "500":
+          description: Internal error
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+  /events/{id}:
+    get:
+      summary: Look up an event and its delivery history
+      description: |
+        Use the `id` returned by POST /events. Shows the current status
+        (PENDING, IN_FLIGHT, DELIVERED or DEAD), how many tries were made,
+        the last error, and one history row per delivery try.
+      operationId: getEvent
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer, format: int64, minimum: 1 }
+      responses:
+        "200":
+          description: The event
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/EventView" }
+        "400":
+          description: id is not a positive number
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: Missing or wrong X-API-Key
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404":
+          description: No event with that id
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+  /healthz:
+    get:
+      summary: Health check
+      description: 200 when the database answers, 503 when it doesn't. No API key needed.
+      operationId: health
+      security: []
+      responses:
+        "200":
+          description: Healthy
+          content:
+            application/json:
+              example: { status: ok }
+        "503":
+          description: Database unreachable
+          content:
+            application/json:
+              example: { status: database unreachable }
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+  schemas:
+    EventRequest:
+      type: object
+      additionalProperties: false
+      required: [tenant_id, endpoint_id, event_id, event_type, payload]
+      properties:
+        tenant_id: { type: integer, format: int64, minimum: 1, description: Tenant that owns the event }
+        endpoint_id: { type: integer, format: int64, minimum: 1, description: Must belong to tenant_id }
+        event_id: { type: string, description: "Producer's own ID. Same ID twice = duplicate." }
+        event_type: { type: string, example: payment.completed }
+        payload: { description: Any JSON value; delivered exactly as sent }
+    Accepted:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        duplicate: { type: boolean, example: false }
+    Duplicate:
+      type: object
+      properties:
+        duplicate: { type: boolean, example: true }
+    EventView:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        tenant_id: { type: integer, format: int64 }
+        endpoint_id: { type: integer, format: int64 }
+        event_id: { type: string }
+        event_type: { type: string }
+        status: { type: string, enum: [PENDING, IN_FLIGHT, DELIVERED, DEAD] }
+        attempts: { type: integer }
+        next_attempt_at: { type: string, format: date-time }
+        last_error: { type: string, nullable: true }
+        delivered_at: { type: string, format: date-time, nullable: true }
+        created_at: { type: string, format: date-time }
+        history:
+          type: array
+          items: { $ref: "#/components/schemas/Attempt" }
+    Attempt:
+      type: object
+      properties:
+        attempt_number: { type: integer }
+        started_at: { type: string, format: date-time }
+        finished_at: { type: string, format: date-time }
+        duration_ms: { type: integer }
+        http_status: { type: integer, nullable: true, description: null when no reply came back }
+        error: { type: string, nullable: true }
+    Error:
+      type: object
+      properties:
+        error: { type: string }

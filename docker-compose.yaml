@@ -1,3 +1,18 @@
+# Start everything:      docker compose up --build -d
+# Watch the dispatchers: docker compose logs -f dispatcher
+# Stop everything:       docker compose down          (add -v to also wipe the database)
+#
+# Benchmark inside Docker (the running dispatchers must be stopped first,
+# or they would steal the benchmark's events):
+#   docker compose stop dispatcher
+#   docker compose run --rm bench
+#   docker compose start dispatcher
+#
+# API docs (Swagger UI): http://localhost:8081/docs
+
+# One place for the in-Docker database address ("postgres" is the service name below)
+x-database-url: &database-url "postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable"
+
 services:
   postgres:
     image: postgres:17
@@ -5,7 +20,7 @@ services:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB}
-    ports: ["5433:5432"]
+    ports: ["5433:5432"] # 5433 on Windows, because a local PostgreSQL already uses 5432
     volumes: ["pgdata:/var/lib/postgresql/data"]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
@@ -13,31 +28,80 @@ services:
       timeout: 3s
       retries: 20
 
+  # One-shot job: create/upgrade the tables, then exit
   migrate:
-    image: migrate/migrate
-    volumes: ["./migrations:/migrations"]
-    command: ["-path", "/migrations", "-database", "postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable", "up"]
+    image: migrate/migrate:v4.18.1
+    volumes: ["./migrations:/migrations:ro"]
+    command: ["-path", "/migrations", "-database", *database-url, "up"]
     depends_on:
       postgres: { condition: service_healthy }
 
+  # One-shot job: insert demo tenants + endpoints, then exit
+  seed:
+    image: postgres:17
+    volumes: ["./scripts/seed.sql:/seed.sql:ro"]
+    environment:
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+    command:
+      [
+        "psql", "-h", "postgres", "-U", "${POSTGRES_USER}", "-d", "${POSTGRES_DB}",
+        "-v", "ON_ERROR_STOP=1",
+        "-v", "receiver=http://fakereceiver:9900",
+        "-f", "/seed.sql",
+      ]
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+
+  # Ingest API: POST /events
   server:
     build: { context: ., args: { APP: server } }
     env_file: .env
-    ports: ["8080:8080"]
+    environment:
+      DATABASE_URL: *database-url
+      HTTP_ADDR: ":8080"
+    ports: ["8081:8080"] # 8081 on Windows, because 8080 is already taken
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
     depends_on:
-      migrate: { condition: service_completed_successfully }
+      seed: { condition: service_completed_successfully }
 
+  # Delivery engine: two copies, to show the per-tenant cap holds across processes
   dispatcher:
     build: { context: ., args: { APP: dispatcher } }
     env_file: .env
+    environment:
+      DATABASE_URL: *database-url
     deploy: { replicas: 2 }
+    stop_grace_period: 20s # time to finish in-flight deliveries (REQUEST_TIMEOUT is 10s)
+    restart: unless-stopped
     depends_on:
-      migrate: { condition: service_completed_successfully }
+      seed: { condition: service_completed_successfully }
+      fakereceiver: { condition: service_started }
 
+  # Pretend customer servers (modes: ok, slow, hang, error, ratelimit)
   fakereceiver:
     build: { context: ., args: { APP: fakereceiver } }
+    environment:
+      RECEIVER_ADDR: ":9900"
+    ports: ["9900:9900"] # 9900, because HMS's gateway already uses 9000
+    restart: unless-stopped
+
+  # FIFO vs round robin benchmark. Only runs when asked: docker compose run --rm bench
+  bench:
+    build: { context: ., args: { APP: bench } }
+    profiles: ["bench"]
     env_file: .env
-    ports: ["9000:9000"]
+    environment:
+      DATABASE_URL: *database-url
+      BENCH_RECEIVER_URL: "http://fakereceiver:9900"
+    volumes: ["./bench/results:/work/bench/results"]
+    depends_on:
+      seed: { condition: service_completed_successfully }
+      fakereceiver: { condition: service_started }
 
 volumes:
   pgdata: {}

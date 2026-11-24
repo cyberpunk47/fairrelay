@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"strconv"
 
 	"github.com/cyberpunk47/fairrelay/internal/domain"
 	"github.com/cyberpunk47/fairrelay/internal/store"
@@ -41,11 +42,17 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
 }
 
+// authorized checks the X-API-Key header.
+// Constant-time compare, so the key can't be guessed by timing the replies.
+func (h *Handler) authorized(r *http.Request) bool {
+	key := r.Header.Get("X-API-Key")
+	return subtle.ConstantTimeCompare([]byte(key), []byte(h.apiKey)) == 1
+}
+
 // CreateEvent handles POST /events.
 func (h *Handler) CreateEvent(w http.ResponseWriter, r *http.Request) {
-	// 1. API key (constant-time compare, so the key can't be guessed by timing replies)
-	key := r.Header.Get("X-API-Key")
-	if subtle.ConstantTimeCompare([]byte(key), []byte(h.apiKey)) != 1 {
+	// 1. API key
+	if !h.authorized(r) {
 		writeError(w, http.StatusUnauthorized, "invalid api key")
 		return
 	}
@@ -120,4 +127,40 @@ func validate(req request) string {
 		return "payload must be valid JSON"
 	}
 	return ""
+}
+
+// GetEvent handles GET /events/{id}: the event's status plus every delivery try.
+func (h *Handler) GetEvent(w http.ResponseWriter, r *http.Request) {
+	if !h.authorized(r) {
+		writeError(w, http.StatusUnauthorized, "invalid api key")
+		return
+	}
+
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil || id <= 0 {
+		writeError(w, http.StatusBadRequest, "id must be a positive number")
+		return
+	}
+
+	ev, err := h.store.GetEvent(r.Context(), id)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "event not found")
+		return
+	}
+	if err != nil {
+		log.Printf("get event %d failed: %v", id, err)
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	writeJSON(w, http.StatusOK, ev)
+}
+
+// Health handles GET /healthz: 200 when the database answers, 503 when it doesn't.
+// No API key, so Docker and load balancers can call it.
+func (h *Handler) Health(w http.ResponseWriter, r *http.Request) {
+	if err := h.store.Ping(r.Context()); err != nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "database unreachable"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
