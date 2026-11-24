@@ -27,7 +27,10 @@ type Store interface {
 	MarkRetry(ctx context.Context, r domain.AttemptResult, nextAttemptAt time.Time) error
 	MarkDead(ctx context.Context, r domain.AttemptResult) error
 	GetEndpoint(ctx context.Context, id int64) (domain.Endpoint, error)
-	DueTenants(ctx context.Context)([]int64, error)
+	DueTenants(ctx context.Context) ([]int64, error)
+	// ClaimOldest claims the oldest due event of ANY tenant, with no cap. Used by the FIFO baseline.
+
+	ClaimOldest(ctx context.Context, lease time.Duration) (domain.ClaimedEvent, bool, error)
 }
 
 // ErrUnknownEndpoint: the endpoint doesn't exist or belongs to another tenant.

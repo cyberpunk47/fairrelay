@@ -36,6 +36,7 @@ type Endpoint struct {
 	URL      string
 	Secret   string
 }
+
 const (
 	StatusPending   = "PENDING"
 	StatusInFlight  = "IN_FLIGHT"

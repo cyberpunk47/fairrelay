@@ -299,7 +299,7 @@ endpoints WHERE id = $1`
 
 func (p *Postgres) GetEndpoint(ctx context.Context, id int64) (domain.Endpoint, error) {
 	var ep domain.Endpoint
-	err := p.pool.QueryRow(ctx, getEndpointSQL , id).Scan(&ep.ID , &ep.TenantID , &ep.URL, &ep.Secret)
+	err := p.pool.QueryRow(ctx, getEndpointSQL, id).Scan(&ep.ID, &ep.TenantID, &ep.URL, &ep.Secret)
 	if err != nil {
 		return ep, fmt.Errorf("get endpoint %d: %w", id, err)
 	}
@@ -309,14 +309,46 @@ func (p *Postgres) GetEndpoint(ctx context.Context, id int64) (domain.Endpoint, 
 const dueTenantsSQL = `SELECT DISTINCT tenant_id FROM events
 WHERE status = 'PENDING' AND next_attempt_at <= now()
 ORDER BY tenant_id`
-func (p* Postgres) DueTenants(ctx context.Context)([]int64, error){
-	rows , err := p.pool.Query(ctx , dueTenantsSQL)
-	if err != nil{
-		return nil , fmt.Errorf("due tenants: %w", err)
+
+func (p *Postgres) DueTenants(ctx context.Context) ([]int64, error) {
+	rows, err := p.pool.Query(ctx, dueTenantsSQL)
+	if err != nil {
+		return nil, fmt.Errorf("due tenants: %w", err)
 	}
-	ids , err := pgx.CollectRows(rows, pgx.RowTo[int64])
-	if err != nil{
-		return nil , fmt.Errorf("due tenants: %w", err)
+	ids, err := pgx.CollectRows(rows, pgx.RowTo[int64])
+	if err != nil {
+		return nil, fmt.Errorf("due tenants: %w", err)
 	}
 	return ids, nil
+}
+
+const claimOldestSQL = `
+UPDATE events
+SET status      = 'IN_FLIGHT',
+    lease_until = now() + make_interval(secs => $1),
+    lease_token = lease_token + 1,
+    attempts    = attempts + 1
+WHERE id = (
+    SELECT id FROM events
+    WHERE status = 'PENDING'
+      AND next_attempt_at <= now()
+    ORDER BY next_attempt_at
+    LIMIT 1
+    FOR UPDATE SKIP LOCKED
+)
+RETURNING id, tenant_id, endpoint_id, external_id, event_type, payload, attempts, lease_token`
+
+func (p *Postgres) ClaimOldest(ctx context.Context, lease time.Duration) (domain.ClaimedEvent, bool, error) {
+	var ev domain.ClaimedEvent
+	err := p.pool.QueryRow(ctx, claimOldestSQL, lease.Seconds()).Scan(
+		&ev.ID, &ev.TenantID, &ev.EndpointID, &ev.ExternalID,
+		&ev.EventType, &ev.Payload, &ev.Attempts, &ev.LeaseToken,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ev, false, nil // 6. nothing due
+	}
+	if err != nil {
+		return ev, false, fmt.Errorf("claim oldest: %w", err)
+	}
+	return ev, true, nil
 }

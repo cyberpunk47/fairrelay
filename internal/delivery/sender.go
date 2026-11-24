@@ -16,8 +16,8 @@ import (
 // Result is what happened during one HTTP try. The sender only reports;
 // deciding delivered / retry / dead is a separate job.
 type Result struct {
-	StatusCode int           // 0 = no reply came back
-	Err        error         // timeout, connection refused, ...; nil if we got a reply
+	StatusCode int   // 0 = no reply came back
+	Err        error // timeout, connection refused, ...; nil if we got a reply
 	StartedAt  time.Time
 	FinishedAt time.Time
 	RetryAfter time.Duration // from the Retry-After header; 0 if none
@@ -32,8 +32,8 @@ type Sender struct {
 func NewSender(connectTimeout, requestTimeout time.Duration) *Sender {
 	transport := &http.Transport{
 		DialContext:         (&net.Dialer{Timeout: connectTimeout}).DialContext, // give up connecting after 2 s
-		MaxIdleConnsPerHost: 10,               // keep up to 10 open connections per customer
-		IdleConnTimeout:     90 * time.Second, // close connections unused for 90 s
+		MaxIdleConnsPerHost: 10,                                                 // keep up to 10 open connections per customer
+		IdleConnTimeout:     90 * time.Second,                                   // close connections unused for 90 s
 	}
 	return &Sender{
 		client: &http.Client{

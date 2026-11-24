@@ -9,7 +9,7 @@ import (
 
 func Sign(secret string, unixTime int64, body []byte) string {
 	ts := strconv.FormatInt(unixTime, 10)
-	mac := hmac.New(sha256.New , []byte(secret))
+	mac := hmac.New(sha256.New, []byte(secret))
 	mac.Write([]byte(ts))
 	mac.Write([]byte("."))
 	mac.Write(body)

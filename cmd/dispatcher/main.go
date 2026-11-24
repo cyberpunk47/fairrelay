@@ -74,9 +74,19 @@ func main() {
 		}
 	}()
 
-	// 3. The scheduler runs here until Ctrl+C
-	log.Printf("dispatcher running: %d workers, round robin", workers)
-	scheduler.New(pg, jobs, cfg.LeaseTTL).Run(ctx)
+	// 3. Choose the policy from config (the Strategy pattern)
+	var policy scheduler.Policy
+	if cfg.Policy == "fifo" {
+		policy = scheduler.NewFIFO(pg, cfg.LeaseTTL)
+	} else if cfg.Policy == "roundrobin" {
+		policy = scheduler.NewRoundRobin(pg, cfg.LeaseTTL)
+	} else {
+		log.Printf("policy %q not built yet, using roundrobin", cfg.Policy)
+		policy = scheduler.NewRoundRobin(pg, cfg.LeaseTTL)
+	}
+
+	log.Printf("dispatcher running: %d workers, policy=%s", workers, policy.Name())
+	scheduler.New(policy, jobs).Run(ctx)
 
 	// 4. Clean shutdown
 	log.Println("shutting down: finishing in-flight deliveries...")
